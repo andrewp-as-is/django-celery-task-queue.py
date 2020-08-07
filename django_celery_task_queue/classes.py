@@ -4,10 +4,9 @@ from traceback import format_tb
 
 from django.conf import settings
 from django.db.utils import OperationalError
-import requests
 
-import django_celery_task_queue.signals as signals
 from .models import Exc
+
 
 class Task:
     model = None
@@ -18,91 +17,91 @@ class Task:
 
     @classmethod
     def as_func(cls):
-        def func(*args,**kwargs):
-            return cls().run(*args,**kwargs)
+        def func(*args, **kwargs):
+            task = cls()
+            for k, v in kwargs.items():
+                setattr(task, k, v)
+            task.is_canceled = False
+            task.started_at = datetime.now()
+            try:
+                task.init_task()
+                if task.is_canceled:
+                    return
+                task.run_task()
+                if task.is_canceled:
+                    return
+                task.complete_task()
+            # except OperationalError as e:
+                # if 'deadlock' in str(e).lower():  # deadlock. shit happens
+                #    task.restart_task()
+                #    return
+            #    task.save_exc()
+            #    task.disable_task()
+            except Exception:
+                task.save_exc()
+                task.disable_task()
         return func
 
-    def init(self):
+    def init_task(self):
         pass
 
-    def process_task(self):
-        pass
-
-    def run(self,id,**kwargs):
-        self.update_kwargs = {}
-        self.id = id
-        self.started_at = datetime.now()
-        for k,v in kwargs.items():
-            setattr(self,k,v)
-        try:
-            self.init()
-            if self.id:
-                self.process_task()
-            if self.id:
-                self.complete_task()
-        except OperationalError as e:
-            if 'deadlock' in str(e).lower(): # deadlock. shit happens
-                self.restart_task()
-                return
-            self.save_exc()
-            self.disable_task()
-        except Exception:
-            self.save_exc()
-            self.disable_task()
+    def run_task(self):
+        raise NotImplementedError(
+            '%s.run_task NOT IMPLEMENTED' % self.__class__.__name__)
 
     def delete_task(self):
-        signals.task_deleted.send(sender=self.__class__, instance=self)
         self.model.objects.filter(id=self.id).delete()
-        self.id = None
+        self.is_canceled = True
 
-    def complete_task(self):
-        if not self.id:
-            return
-        signals.task_completed.send(sender=self.__class__, instance=self)
-        completed_at = datetime.now()
-        self.update_kwargs.update(
-            is_completed = True,
-            is_enqueued = False,
-            is_disabled = False,
-            started_at = self.started_at,
-            completed_at = completed_at
-        )
-        self.model.objects.filter(id=self.id).update(**self.update_kwargs)
-        self.id = None
-
-    def disable_task(self):
-        signals.task_disabled.send(sender=self.__class__, instance=self)
-        kwargs = dict(
-            is_disabled = True,
-            is_enqueued = False,
-            enqueued_at = None,
-            started_at = None,
-            completed_at = None,
-            disabled_at = datetime.now(),
+    def complete_task(self, **kwargs):
+        kwargs.update(
+            is_completed=True,
+            is_disabled=False,
+            is_enqueued=False,
+            is_restarted=False,
+            completed_at=datetime.now(),
+            disabled_at=None,
+            restarted_at=None,
+            started_at=self.started_at,
+            updated_at=datetime.now()
         )
         self.model.objects.filter(id=self.id).update(**kwargs)
-        self.id = None
+        self.is_canceled = True
 
-    def restart_task(self):
-        signals.task_restarted.send(sender=self.__class__, instance=self)
+    def disable_task(self):
         self.model.objects.filter(id=self.id).update(
-            is_completed = False,
-            is_enqueued = False,
-            is_disabled = False,
-            enqueued_at = None,
-            started_at = None,
-            disabled_at = None
+            is_disabled=True,
+            is_enqueued=False,
+            is_restarted=False,
+            completed_at=None,
+            disabled_at=datetime.now(),
+            enqueued_at=None,
+            restarted_at=None,
+            started_at=None,
+            updated_at=datetime.now()
         )
-        self.log_task(completed_at = None,is_restarted=True)
-        self.id = None
+        self.is_canceled = True
+
+    def restart_task(self, priority=None):
+        self.model.objects.filter(id=self.id).update(
+            is_disabled=False,
+            is_enqueued=False,
+            is_restarted=True,
+            disabled_at=None,
+            enqueued_at=None,
+            restarted_at=datetime.now(),
+            started_at=None,
+            updated_at=datetime.now(),
+            priority=priority if priority is not None else self.priority
+        )
+        self.is_canceled = True
 
     def save_exc(self):
         exc, exc_value, tb = sys.exc_info()
         Exc(
-            db_table = self.model._meta.db_table,
-            task_id = self.id,
-            exc_type = exc.__module__+'.'+exc.__name__ if exc.__module__ else exc.__name__,
-            exc_value = exc_value if exc_value else '',
-            exc_traceback = '\n'.join(format_tb(tb))
+            db_table=self.model._meta.db_table,
+            task_id=self.id,
+            exc_type=exc.__module__ + '.' + exc.__name__ if exc.__module__ else exc.__name__,
+            exc_value=exc_value if exc_value else '',
+            exc_traceback='\n'.join(format_tb(tb))
         ).save()
-
