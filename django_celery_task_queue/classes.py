@@ -70,6 +70,7 @@ class Task:
 
     def disable_task(self):
         self.model.objects.filter(id=self.id).update(
+            is_completed=False,
             is_disabled=True,
             is_enqueued=False,
             is_restarted=False,
@@ -84,6 +85,7 @@ class Task:
 
     def restart_task(self, priority=None):
         self.model.objects.filter(id=self.id).update(
+            is_completed=False,
             is_disabled=False,
             is_enqueued=False,
             is_restarted=True,
